@@ -7,8 +7,12 @@ import { z } from "zod";
 import Groq from "groq-sdk";
 
 // Initialize Groq client
+if (!process.env.GROQ_API_KEY) {
+  console.warn("GROQ_API_KEY is not set. Chat functionality will fail.");
+}
+
 const groq = new Groq({
-  apiKey: process.env.GROQ_API_KEY,
+  apiKey: process.env.GROQ_API_KEY || "missing_key",
 });
 
 export async function registerRoutes(
@@ -60,11 +64,23 @@ export async function registerRoutes(
 
       res.status(201).json(aiMessage);
     } catch (err: any) {
+      const isGroqError = err.message?.toLowerCase().includes("groq") || err.message?.toLowerCase().includes("api key") || err.message?.toLowerCase().includes("authentication");
+      const isDbError = err.message?.toLowerCase().includes("database") || err.message?.toLowerCase().includes("postgres") || err.message?.toLowerCase().includes("relation");
+
+      let userMessage = "Failed to process chat message";
+      if (isGroqError) userMessage = "AI Error: Please verify your GROQ_API_KEY in Vercel settings.";
+      if (isDbError) userMessage = "Database Error: Please verify your DATABASE_URL in Vercel settings.";
+
       console.error("Chat Error Detail:", {
         message: err.message,
         stack: err.stack,
+        isGroqError,
+        isDbError
       });
-      res.status(500).json({ message: "Failed to process chat message", detail: err.message });
+      res.status(500).json({
+        message: userMessage,
+        detail: err.message
+      });
     }
   });
 
