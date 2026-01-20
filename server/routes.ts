@@ -21,8 +21,13 @@ export async function registerRoutes(
 ): Promise<Server> {
 
   app.get(api.messages.list.path, async (req, res) => {
-    const messages = await storage.getMessages();
-    res.json(messages);
+    try {
+      const messages = await storage.getMessages();
+      res.json(messages);
+    } catch (err: any) {
+      console.error("Fetch Messages Error:", err);
+      res.status(500).json({ message: "Database Error: Could not fetch messages", detail: err.message });
+    }
   });
 
   app.post(api.messages.create.path, async (req, res) => {
@@ -90,12 +95,17 @@ export async function registerRoutes(
   });
 
   // Seed data
-  const existingMessages = await storage.getMessages();
-  if (existingMessages.length === 0) {
-    await storage.createMessage({
-      role: "assistant",
-      content: "Hey there! 💫 I'm Project A, and I'm so happy to chat with you! Whether you need help with something, want to explore ideas together, or just need a friendly ear—I'm here for you. What's on your mind today?"
-    });
+  try {
+    const existingMessages = await storage.getMessages();
+    if (existingMessages.length === 0) {
+      await storage.createMessage({
+        role: "assistant",
+        content: "Hey there! 💫 I'm Project A, and I'm so happy to chat with you! Whether you need help with something, want to explore ideas together, or just need a friendly ear—I'm here for you. What's on your mind today?"
+      });
+    }
+  } catch (seedError: any) {
+    console.error("Failed to seed data:", seedError.message);
+    // Continue anyway so the server can at least start and provide more diagnostics
   }
 
   return httpServer;
