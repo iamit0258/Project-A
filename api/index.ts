@@ -8,32 +8,55 @@ const messageSchema = z.object({
     id: z.number(),
     role: z.enum(["user", "assistant"]),
     content: z.string(),
+    user_id: z.string().optional(),
     created_at: z.coerce.date().optional(),
 });
 
 type Message = z.infer<typeof messageSchema>;
-type InsertMessage = { role: "user" | "assistant"; content: string };
+type InsertMessage = { role: "user" | "assistant"; content: string; user_id?: string };
 
-// ===== SUPABASE STORAGE =====
+// ===== SUPABASE =====
 function getSupabaseClient() {
     const url = process.env.SUPABASE_URL || "https://xwwcanprwehvdgbztslk.supabase.co";
-    const key = process.env.SUPABASE_ANON_KEY || process.env.SUPABASE_SERVICE_KEY || "";
-
-    if (!key) {
-        console.warn("SUPABASE_ANON_KEY is not set. Using DATABASE_URL fallback.");
-    }
-
+    const key = process.env.SUPABASE_ANON_KEY || "";
     return createClient(url, key);
 }
 
+// Verify JWT and get user ID
+async function getUserIdFromToken(authHeader: string | undefined): Promise<string | null> {
+    if (!authHeader || !authHeader.startsWith("Bearer ")) {
+        return null;
+    }
+
+    const token = authHeader.substring(7);
+    const supabase = getSupabaseClient();
+
+    const { data: { user }, error } = await supabase.auth.getUser(token);
+
+    if (error || !user) {
+        console.error("Auth error:", error);
+        return null;
+    }
+
+    return user.id;
+}
+
+// ===== STORAGE CLASS =====
 class SupabaseStorage {
     private supabase = getSupabaseClient();
 
-    async getMessages(): Promise<Message[]> {
-        const { data, error } = await this.supabase
+    async getMessages(userId: string | null): Promise<Message[]> {
+        let query = this.supabase
             .from("messages")
             .select("*")
             .order("created_at", { ascending: true });
+
+        // Filter by user if authenticated
+        if (userId) {
+            query = query.eq("user_id", userId);
+        }
+
+        const { data, error } = await query;
 
         if (error) {
             console.error("Supabase getMessages error:", error);
@@ -58,11 +81,16 @@ class SupabaseStorage {
         return data;
     }
 
-    async clearMessages(): Promise<void> {
-        const { error } = await this.supabase
-            .from("messages")
-            .delete()
-            .neq("id", 0); // Delete all rows
+    async clearMessages(userId: string | null): Promise<void> {
+        let query = this.supabase.from("messages").delete();
+
+        if (userId) {
+            query = query.eq("user_id", userId);
+        } else {
+            query = query.neq("id", 0); // Delete all if no user
+        }
+
+        const { error } = await query;
 
         if (error) {
             console.error("Supabase clearMessages error:", error);
@@ -90,7 +118,8 @@ app.use(express.urlencoded({ extended: false }));
 // GET /api/messages
 app.get("/api/messages", async (req, res) => {
     try {
-        const messages = await storage.getMessages();
+        const userId = await getUserIdFromToken(req.headers.authorization);
+        const messages = await storage.getMessages(userId);
         res.json(messages);
     } catch (err: any) {
         console.error("Fetch Messages Error:", err);
@@ -101,14 +130,24 @@ app.get("/api/messages", async (req, res) => {
 // POST /api/messages
 app.post("/api/messages", async (req, res) => {
     try {
+        const userId = await getUserIdFromToken(req.headers.authorization);
+
+        if (!userId) {
+            return res.status(401).json({ message: "Unauthorized: Please sign in" });
+        }
+
         const inputSchema = z.object({ content: z.string().min(1) });
         const input = inputSchema.parse(req.body);
 
-        // Save user message
-        await storage.createMessage({ role: "user", content: input.content });
+        // Save user message with user_id
+        await storage.createMessage({
+            role: "user",
+            content: input.content,
+            user_id: userId
+        });
 
-        // Get history for context
-        const history = await storage.getMessages();
+        // Get history for context (only this user's messages)
+        const history = await storage.getMessages(userId);
         const messagesForGroq = history.map((msg) => ({
             role: msg.role as "assistant" | "user",
             content: msg.content,
@@ -131,10 +170,11 @@ app.post("/api/messages", async (req, res) => {
             completion.choices[0]?.message?.content ||
             "I couldn't generate a response.";
 
-        // Save AI message
+        // Save AI message with same user_id
         const aiMessage = await storage.createMessage({
             role: "assistant",
             content: aiContent,
+            user_id: userId
         });
 
         res.status(201).json(aiMessage);
@@ -160,7 +200,8 @@ app.post("/api/messages", async (req, res) => {
 // POST /api/messages/clear
 app.post("/api/messages/clear", async (req, res) => {
     try {
-        await storage.clearMessages();
+        const userId = await getUserIdFromToken(req.headers.authorization);
+        await storage.clearMessages(userId);
         res.status(204).send();
     } catch (err: any) {
         res.status(500).json({ message: "Failed to clear", detail: err.message });

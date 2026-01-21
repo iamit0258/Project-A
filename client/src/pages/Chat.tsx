@@ -3,8 +3,9 @@ import { MessageBubble } from "@/components/MessageBubble";
 import { ChatInput } from "@/components/ChatInput";
 import { TypingIndicator } from "@/components/TypingIndicator";
 import { useMessages, useSendMessage, useClearMessages } from "@/hooks/use-messages";
-import { Moon, Sun, Trash2, MessageSquareText, Menu, Mic } from "lucide-react";
+import { Moon, Sun, Trash2, MessageSquareText, Menu, Mic, LogOut } from "lucide-react";
 import { useTheme } from "@/components/ThemeProvider";
+import { useAuth } from "@/context/AuthContext";
 import { Button } from "@/components/ui/button";
 import {
   Sheet,
@@ -251,7 +252,35 @@ function Header({ onClear, isClearing, hasMessages }: { onClear: () => void, isC
             Clear Chat
           </Button>
         </div>
+
+        <LogoutButton />
       </div>
     </header >
   );
 }
+
+function LogoutButton() {
+  const { signOut, user } = useAuth();
+
+  const handleLogout = async () => {
+    try {
+      await signOut();
+    } catch (error) {
+      console.error("Logout error:", error);
+    }
+  };
+
+  return (
+    <Button
+      variant="ghost"
+      size="sm"
+      onClick={handleLogout}
+      className="text-muted-foreground hover:text-destructive hover:bg-destructive/5 transition-colors"
+      title={user?.email || "Sign out"}
+    >
+      <LogOut className="w-4 h-4 mr-2" />
+      Sign Out
+    </Button>
+  );
+}
+
