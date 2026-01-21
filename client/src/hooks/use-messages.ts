@@ -32,6 +32,18 @@ export function useSendMessage() {
   return useMutation({
     mutationFn: async (content: string) => {
       const authHeaders = await getAuthHeaders();
+
+      // Optimistically add user message to cache immediately
+      const userMessage: Message = {
+        id: Date.now(), // Temporary ID
+        role: "user",
+        content,
+        createdAt: new Date(),
+      };
+
+      const currentMessages = queryClient.getQueryData<Message[]>([api.messages.list.path]) || [];
+      queryClient.setQueryData([api.messages.list.path], [...currentMessages, userMessage]);
+
       const res = await fetch(api.messages.create.path, {
         method: api.messages.create.method,
         headers: {
@@ -52,8 +64,10 @@ export function useSendMessage() {
 
       return api.messages.create.responses[201].parse(await res.json());
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: [api.messages.list.path] });
+    onSuccess: (aiResponse) => {
+      // Append AI response to current cache (don't refetch from DB)
+      const currentMessages = queryClient.getQueryData<Message[]>([api.messages.list.path]) || [];
+      queryClient.setQueryData([api.messages.list.path], [...currentMessages, aiResponse]);
     },
   });
 }
