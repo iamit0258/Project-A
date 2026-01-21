@@ -5,5 +5,10 @@
             "destination": "/api"
         }
     ],
-    "outputDirectory": "dist/public"
+    "outputDirectory": "dist/public",
+    "functions": {
+        "api/index.ts": {
+            "includeFiles": "server/**,shared/**"
+        }
+    }
 }
