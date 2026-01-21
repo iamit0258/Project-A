@@ -1,43 +1,77 @@
 import express, { type Request, Response, NextFunction } from "express";
 import Groq from "groq-sdk";
 import { z } from "zod";
+import { createClient } from "@supabase/supabase-js";
 
 // ===== SCHEMA =====
 const messageSchema = z.object({
     id: z.number(),
     role: z.enum(["user", "assistant"]),
     content: z.string(),
-    createdAt: z.coerce.date().optional(),
+    created_at: z.coerce.date().optional(),
 });
 
 type Message = z.infer<typeof messageSchema>;
 type InsertMessage = { role: "user" | "assistant"; content: string };
 
-// ===== IN-MEMORY STORAGE =====
-class MemStorage {
-    private messages: Message[] = [];
-    private currentId = 1;
+// ===== SUPABASE STORAGE =====
+function getSupabaseClient() {
+    const url = process.env.SUPABASE_URL || "https://xwwcanprwehvdgbztslk.supabase.co";
+    const key = process.env.SUPABASE_ANON_KEY || process.env.SUPABASE_SERVICE_KEY || "";
+
+    if (!key) {
+        console.warn("SUPABASE_ANON_KEY is not set. Using DATABASE_URL fallback.");
+    }
+
+    return createClient(url, key);
+}
+
+class SupabaseStorage {
+    private supabase = getSupabaseClient();
 
     async getMessages(): Promise<Message[]> {
-        return this.messages;
+        const { data, error } = await this.supabase
+            .from("messages")
+            .select("*")
+            .order("created_at", { ascending: true });
+
+        if (error) {
+            console.error("Supabase getMessages error:", error);
+            throw new Error(`Database Error: ${error.message}`);
+        }
+
+        return data || [];
     }
 
     async createMessage(insertMessage: InsertMessage): Promise<Message> {
-        const message: Message = {
-            ...insertMessage,
-            id: this.currentId++,
-            createdAt: new Date(),
-        };
-        this.messages.push(message);
-        return message;
+        const { data, error } = await this.supabase
+            .from("messages")
+            .insert([insertMessage])
+            .select()
+            .single();
+
+        if (error) {
+            console.error("Supabase createMessage error:", error);
+            throw new Error(`Database Error: ${error.message}`);
+        }
+
+        return data;
     }
 
     async clearMessages(): Promise<void> {
-        this.messages = [];
+        const { error } = await this.supabase
+            .from("messages")
+            .delete()
+            .neq("id", 0); // Delete all rows
+
+        if (error) {
+            console.error("Supabase clearMessages error:", error);
+            throw new Error(`Database Error: ${error.message}`);
+        }
     }
 }
 
-const storage = new MemStorage();
+const storage = new SupabaseStorage();
 
 // ===== GROQ CLIENT =====
 function getGroqClient() {
@@ -110,11 +144,14 @@ app.post("/api/messages", async (req, res) => {
             err.message?.toLowerCase().includes("groq") ||
             err.message?.toLowerCase().includes("api key") ||
             err.message?.toLowerCase().includes("authentication");
+        const isDbError = err.message?.toLowerCase().includes("database");
 
         res.status(500).json({
             message: isGroqError
                 ? "AI Error: Check GROQ_API_KEY"
-                : "Failed to process message",
+                : isDbError
+                    ? "Database Error: Check SUPABASE keys"
+                    : "Failed to process message",
             detail: err.message,
         });
     }
@@ -122,8 +159,12 @@ app.post("/api/messages", async (req, res) => {
 
 // POST /api/messages/clear
 app.post("/api/messages/clear", async (req, res) => {
-    await storage.clearMessages();
-    res.status(204).send();
+    try {
+        await storage.clearMessages();
+        res.status(204).send();
+    } catch (err: any) {
+        res.status(500).json({ message: "Failed to clear", detail: err.message });
+    }
 });
 
 // Error handler
@@ -131,22 +172,6 @@ app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
     console.error("Unhandled error:", err);
     res.status(500).json({ message: err.message || "Internal Server Error" });
 });
-
-// Seed initial message
-(async () => {
-    try {
-        const msgs = await storage.getMessages();
-        if (msgs.length === 0) {
-            await storage.createMessage({
-                role: "assistant",
-                content:
-                    "Hey there! 💫 I'm Project A, and I'm so happy to chat with you! Whether you need help with something, want to explore ideas together, or just need a friendly ear—I'm here for you. What's on your mind today?",
-            });
-        }
-    } catch (e) {
-        console.error("Seed error:", e);
-    }
-})();
 
 // ===== VERCEL HANDLER =====
 export default function handler(req: any, res: any) {
