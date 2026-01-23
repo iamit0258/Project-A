@@ -1,7 +1,7 @@
 import express, { type Request, Response, NextFunction } from "express";
 import Groq from "groq-sdk";
 import { z } from "zod";
-import { createClient } from "@supabase/supabase-js";
+import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
 // ===== SCHEMA =====
 const messageSchema = z.object({
@@ -16,38 +16,27 @@ type Message = z.infer<typeof messageSchema>;
 type InsertMessage = { role: "user" | "assistant"; content: string; user_id?: string };
 
 // ===== SUPABASE =====
-function getSupabaseClient() {
+function getSupabaseClient(token?: string) {
     const url = process.env.SUPABASE_URL || "https://xwwcanprwehvdgbztslk.supabase.co";
     const key = process.env.SUPABASE_ANON_KEY || "";
-    return createClient(url, key);
+
+    const options = token
+        ? { global: { headers: { Authorization: token } } }
+        : {};
+
+    return createClient(url, key, options);
 }
 
-// Verify JWT and get user ID
-async function getUserIdFromToken(authHeader: string | undefined): Promise<string | null> {
-    if (!authHeader || !authHeader.startsWith("Bearer ")) {
-        console.log("No auth header or not Bearer token");
-        return null;
-    }
-
-    const token = authHeader.substring(7);
-    console.log("Token received, length:", token.length);
-
-    const supabase = getSupabaseClient();
-
+// Verify JWT and get user ID using the client
+async function getUser(supabase: SupabaseClient): Promise<string | null> {
     try {
-        const { data: { user }, error } = await supabase.auth.getUser(token);
+        const { data: { user }, error } = await supabase.auth.getUser();
 
-        if (error) {
-            console.error("Supabase auth error:", error.message);
+        if (error || !user) {
+            console.log("Auth check: specific user not found or error", error?.message);
             return null;
         }
 
-        if (!user) {
-            console.log("No user returned from token verification");
-            return null;
-        }
-
-        console.log("User authenticated:", user.id);
         return user.id;
     } catch (err: any) {
         console.error("Token verification exception:", err.message);
@@ -57,15 +46,16 @@ async function getUserIdFromToken(authHeader: string | undefined): Promise<strin
 
 // ===== STORAGE CLASS =====
 class SupabaseStorage {
-    private supabase = getSupabaseClient();
 
-    async getMessages(userId: string | null): Promise<Message[]> {
-        let query = this.supabase
+    async getMessages(client: SupabaseClient, userId: string | null): Promise<Message[]> {
+        let query = client
             .from("messages")
             .select("*")
+            .eq("is_archived", false)
             .order("created_at", { ascending: true });
 
         // Filter by user if authenticated
+        // Note: If RLS is on, this might be redundant but safe
         if (userId) {
             query = query.eq("user_id", userId);
         }
@@ -80,8 +70,8 @@ class SupabaseStorage {
         return data || [];
     }
 
-    async createMessage(insertMessage: InsertMessage): Promise<Message> {
-        const { data, error } = await this.supabase
+    async createMessage(client: SupabaseClient, insertMessage: InsertMessage): Promise<Message> {
+        const { data, error } = await client
             .from("messages")
             .insert([insertMessage])
             .select()
@@ -95,13 +85,16 @@ class SupabaseStorage {
         return data;
     }
 
-    async clearMessages(userId: string | null): Promise<void> {
-        let query = this.supabase.from("messages").delete();
+    async clearMessages(client: SupabaseClient, userId: string | null): Promise<void> {
+        // Change from DELETE to UPDATE (Soft Delete)
+        let query = client.from("messages").update({ is_archived: true });
 
         if (userId) {
             query = query.eq("user_id", userId);
         } else {
-            query = query.neq("id", 0); // Delete all if no user
+            // CAUTION: This updates everything if no user is authenticated and RLS permits
+            console.warn("Attempting to clear ALL messages (no user scope)");
+            query = query.neq("id", 0);
         }
 
         const { error } = await query;
@@ -132,8 +125,11 @@ app.use(express.urlencoded({ extended: false }));
 // GET /api/messages
 app.get("/api/messages", async (req, res) => {
     try {
-        const userId = await getUserIdFromToken(req.headers.authorization);
-        const messages = await storage.getMessages(userId);
+        const token = req.headers.authorization;
+        const supabase = getSupabaseClient(token);
+        const userId = await getUser(supabase);
+
+        const messages = await storage.getMessages(supabase, userId);
         res.json(messages);
     } catch (err: any) {
         console.error("Fetch Messages Error:", err);
@@ -144,29 +140,23 @@ app.get("/api/messages", async (req, res) => {
 // POST /api/messages
 app.post("/api/messages", async (req, res) => {
     try {
-        console.log("POST /api/messages - Authorization header present:", !!req.headers.authorization);
-
-        // Try to get user ID, but don't require it (for debugging)
-        let userId: string | null = null;
-        try {
-            userId = await getUserIdFromToken(req.headers.authorization);
-            console.log("User ID from token:", userId || "none (will proceed without user context)");
-        } catch (authErr: any) {
-            console.warn("Auth check failed:", authErr.message);
-        }
+        // Authenticate
+        const token = req.headers.authorization;
+        const supabase = getSupabaseClient(token);
+        const userId = await getUser(supabase);
 
         const inputSchema = z.object({ content: z.string().min(1) });
         const input = inputSchema.parse(req.body);
 
-        // Save user message (with or without user_id)
-        await storage.createMessage({
+        // Save user message
+        await storage.createMessage(supabase, {
             role: "user",
             content: input.content,
             user_id: userId || undefined
         });
 
         // Get history for context
-        const history = await storage.getMessages(userId);
+        const history = await storage.getMessages(supabase, userId);
         const messagesForGroq = history.map((msg) => ({
             role: msg.role as "assistant" | "user",
             content: msg.content,
@@ -189,8 +179,8 @@ app.post("/api/messages", async (req, res) => {
             completion.choices[0]?.message?.content ||
             "I couldn't generate a response.";
 
-        // Save AI message with same user_id
-        const aiMessage = await storage.createMessage({
+        // Save AI message
+        const aiMessage = await storage.createMessage(supabase, {
             role: "assistant",
             content: aiContent,
             user_id: userId || undefined
@@ -219,8 +209,11 @@ app.post("/api/messages", async (req, res) => {
 // POST /api/messages/clear
 app.post("/api/messages/clear", async (req, res) => {
     try {
-        const userId = await getUserIdFromToken(req.headers.authorization);
-        await storage.clearMessages(userId);
+        const token = req.headers.authorization;
+        const supabase = getSupabaseClient(token);
+        const userId = await getUser(supabase);
+
+        await storage.clearMessages(supabase, userId);
         res.status(204).send();
     } catch (err: any) {
         res.status(500).json({ message: "Failed to clear", detail: err.message });
@@ -237,3 +230,4 @@ app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
 export default function handler(req: any, res: any) {
     return app(req, res);
 }
+
