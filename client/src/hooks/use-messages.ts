@@ -54,12 +54,20 @@ export function useSendMessage() {
       });
 
       if (!res.ok) {
+        let errorMessage = "Failed to send message";
         try {
-          const error = await res.json();
-          throw new Error(error.message || "Failed to send message");
-        } catch {
-          throw new Error("Failed to send message");
+          const contentType = res.headers.get("content-type");
+          if (contentType && contentType.includes("application/json")) {
+            const errorData = await res.json();
+            errorMessage = errorData.message || errorMessage;
+          } else {
+            const text = await res.text();
+            errorMessage = text || errorMessage;
+          }
+        } catch (e) {
+          console.error("Error parsing response:", e);
         }
+        throw new Error(errorMessage);
       }
 
       return api.messages.create.responses[201].parse(await res.json());

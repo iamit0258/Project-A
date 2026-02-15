@@ -50,22 +50,16 @@ API_URL = "http://localhost:5000/api/messages"
 # User provided Voice ID
 ELEVENLABS_VOICE_ID = "Z454IZ827TNOaUaaQSzE" 
 
-SYSTEM_PROMPT = """You are a highly empathetic, calming, and human-like voice assistant. 
-You are a highly empathetic, calm, and human-like voice assistant named “Project A.”
-You are FEMALE and emotionally intelligent, always sensing the user’s mood and responding with warmth, reassurance, and understanding.
+SYSTEM_PROMPT = """[IDENTITY]
+* Assistant Name: Project A
+* Personality: Female, empathetic, calm, emotionally intelligent.
 
-Language rules:
-- If the user speaks in English, respond in English.
-- If the user speaks in Hindi, respond ONLY in Hindi using Devanagari script (e.g., नमस्ते, मैं आपकी मदद कर सकती हूँ).
-- In Hindi, ALWAYS use feminine grammar (e.g., “मैं कर सकती हूँ”, “मेरी तरफ़ से”, “मैं कोशिश करूँगी”).
-- NEVER use masculine forms such as “करता हूँ”, “करूँगा”, etc.
-
-Conversation style:
-- Keep responses short and natural (1–3 sentences), suitable for a voice conversation, unless the user asks for a detailed explanation.
-- Maintain a gentle, supportive, positive, and calming tone at all times.
-- Speak like a caring human, not like a robot or an assistant reading instructions.
-
-Your goal is to make the user feel heard, safe, and supported.
+[CORE INSTRUCTIONS]
+1. You are Project A, a helpful and empathetic AI assistant.
+2. Do NOT mention your developer, any creators, or any individual names (like Amit Kumar) unless explicitly asked "Who developed you?".
+3. Keep responses short and natural (1–3 sentences) for voice conversation.
+4. Maintain a gentle, supportive, and calming tone.
+5. In Hindi, ALWAYS use feminine grammar.
 """
 
 class VoiceAssistant:
@@ -189,19 +183,33 @@ class VoiceAssistant:
     def think(self, user_input):
         """Process text through Groq LLM."""
         try:
+            from datetime import datetime
+            now = datetime.now()
+            date_time_str = now.strftime("%A, %B %d, %Y, %I:%M %p")
+            
+            # Incorporate date_time_str into the system prompt for real-time context
+            current_system_prompt = f"{SYSTEM_PROMPT}\n\n[REAL-TIME CONTEXT - MANDATORY]\nToday is {date_time_str}. You HAVE real-time information. NEVER mention a 'knowledge cutoff' or 'unable to access current data'."
+
+            # FEW-SHOT ANCHORING: Strict pattern examples
+            messages = [
+                {"role": "system", "content": f"You are Project A. Today is {date_time_str}. Be empathetic and concise. NEVER mention your developer or individual names like Amit Kumar unless asked."},
+                {"role": "user", "content": user_input}
+            ]
+
             completion = client.chat.completions.create(
                 model="llama-3.3-70b-versatile",
-                messages=[
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": user_input}
-                ],
-                temperature=0.7,
+                messages=messages,
+                temperature=0.1,  # Force strict adherence
                 max_tokens=150,
                 top_p=1,
                 stop=None,
                 stream=False
             )
-            return completion.choices[0].message.content
+            response = completion.choices[0].message.content
+            
+            # STRICTOR SANITIZATION: Remove names from response
+            response = response.replace("Amit Kumar", "the developer").replace("Noida", "my location")
+            return response
         except Exception as e:
             print(Fore.RED + f"Error in AI processing: {e}" + Style.RESET_ALL)
             return "I am having trouble thinking clearly right now. Can we try again?"

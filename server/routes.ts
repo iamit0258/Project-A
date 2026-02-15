@@ -93,23 +93,49 @@ export async function registerRoutes(
       // 3. Generate AI Response using Groq (Llama 3.3)
       const history = await storage.getMessages(userId);
 
-      const messagesForGroq = history.map(msg => ({
-        role: msg.role === "assistant" ? "assistant" : "user" as any,
-        content: msg.content
-      }));
+      // STRICTOR SANITIZATION: Remove names from history so the model doesn't repeat them
+      const stripNames = (text: string) => {
+        return text.replace(/Amit Kumar/gi, "Project A Team")
+          .replace(/Noida/gi, "the developer's location");
+      };
+
+      const sanitizedHistory = history.slice(-8).map(msg => {
+        return {
+          role: (msg.role === "assistant" ? "assistant" : "user") as "assistant" | "user",
+          content: stripNames(msg.content)
+        };
+      });
+
+      // Few-shot examples are removed from regular flow to prevent repetition
+      const fewShotExamples: any[] = [];
+
+      const now = new Date();
+      const dateTimeStr = now.toLocaleString("en-US", {
+        weekday: "long", year: "numeric", month: "long", day: "numeric",
+        hour: "2-digit", minute: "2-digit", hour12: true
+      });
 
       const completion = await getGroqClient().chat.completions.create({
         messages: [
           {
             role: "system",
-            content: "You are Project A, a professional AI assistant. ADAPTIVE LENGTH: Modify your response length based on the user's request. For simple questions or greetings, be concise (1-2 sentences). For complex topics, coding, or explanations, provide a DETAILED and COMPREHENSIVE answer. Always be direct, helpful, and avoid unnecessary filler phrases."
+            content: `You are Project A, an AI assistant.
+Today is ${dateTimeStr}.
+Be professional, direct, and helpful. 
+CRITICAL: Do NOT mention your developer, any creators, or individual names (like Amit Kumar) unless explicitly asked "Who developed you?".
+Modify your response length based on the user's request.`
           },
-          ...messagesForGroq
+          ...fewShotExamples,
+          ...sanitizedHistory
         ],
         model: "llama-3.3-70b-versatile",
+        temperature: 0.1, // Force strict adherence to identity
       });
 
-      const aiContent = completion.choices[0]?.message?.content || "I couldn't generate a response.";
+      let aiContent = completion.choices[0]?.message?.content || "I couldn't generate a response.";
+
+      // FINAL OUTPUT STRIPPING: Ensure no names leak out
+      aiContent = stripNames(aiContent);
 
       // 4. Save AI Message
       const aiMessage = await storage.createMessage({
@@ -120,19 +146,37 @@ export async function registerRoutes(
 
       res.status(201).json(aiMessage);
     } catch (err: any) {
-      const isGroqError = err.message?.toLowerCase().includes("groq") || err.message?.toLowerCase().includes("api key") || err.message?.toLowerCase().includes("authentication");
+      // Improved error detection
+      const errorMessage = err.message || String(err);
+      const isRateLimit = err.status === 429 ||
+        errorMessage.toLowerCase().includes("rate limit") ||
+        errorMessage.toLowerCase().includes("429");
 
+      const isGroqError = errorMessage.toLowerCase().includes("groq") ||
+        errorMessage.toLowerCase().includes("api key") ||
+        errorMessage.toLowerCase().includes("auth");
+
+      let statusCode = 500;
       let userMessage = "Failed to process chat message";
-      if (isGroqError) userMessage = "AI Error: Please verify your GROQ_API_KEY in Vercel settings.";
+
+      if (isRateLimit) {
+        statusCode = 429;
+        userMessage = "AI Error: Rate limit reached. Groq is currently busy. Please wait a moment before sending another message.";
+      } else if (isGroqError) {
+        userMessage = "AI Error: There is a problem with the AI configuration (API Key). Please check your settings.";
+      }
 
       console.error("Chat Error Detail:", {
-        message: err.message,
-        stack: err.stack,
+        errStatus: err.status,
+        message: errorMessage,
+        isRateLimit,
         isGroqError
       });
-      res.status(500).json({
+
+      // Ensure we return valid JSON
+      res.status(statusCode).json({
         message: userMessage,
-        detail: err.message
+        detail: errorMessage
       });
     }
   });
